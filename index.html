@@ -437,6 +437,32 @@
 
   <!-- Preview Section (Visible when tasks exist) -->
   <div id="previewSection" style="display: none;">
+    <!-- Date Section & Bot Command Banner -->
+    <div id="dateBannerCard" class="card" style="margin-bottom: 20px; border-color: rgba(59, 130, 246, 0.4); background: linear-gradient(135deg, rgba(30, 41, 59, 0.95), rgba(15, 23, 42, 0.95));">
+      <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 16px;">
+        <div style="display: flex; align-items: center; gap: 14px;">
+          <div style="font-size: 28px;">📅</div>
+          <div>
+            <div style="font-weight: 700; color: #60a5fa; font-size: 15px; display: flex; align-items: center; gap: 8px;">
+              <span>Daily Drop Section</span>
+              <span id="activeDateBadge" class="badge badge-primary" style="font-size: 11px;">17.11.2026</span>
+            </div>
+            <div style="font-size: 12px; color: var(--text-muted); margin-top: 2px;">
+              Auto-detected daily task batches from master ledger sheet.
+            </div>
+          </div>
+        </div>
+        <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+          <label style="font-size: 13px; font-weight: 600; color: var(--text-muted); margin: 0;">Select Date:</label>
+          <select id="dateSectionSelect" onchange="switchDateSection(this.value)" style="background: var(--input-bg); border: 1px solid var(--primary); color: #fff; padding: 7px 12px; border-radius: 6px; font-weight: 600; font-size: 13px;">
+          </select>
+          <button class="btn btn-primary" onclick="copyDiscordCommand()" style="font-size: 12px; padding: 7px 14px;">
+            ⚡ Copy /bulktask Command
+          </button>
+        </div>
+      </div>
+    </div>
+
     <div class="stats-bar">
       <div class="stat-pill">
         <div class="stat-val" id="statTasks">0</div>
@@ -499,6 +525,12 @@
 
 <script>
   let parsedTasks = [];
+  let allDateSections = {};
+  let activeDate = "";
+  let currentSheetUrl = "";
+
+  const dateBannerRegex = /(?:Date\s+)?(\d{1,2}[\.\-\/]\d{1,2}[\.\-\/]\d{2,4})/i;
+  const redditUrlRegex = /https?:\/\/(?:www\.|old\.|new\.)?reddit\.com\/[^\s"]+/i;
 
   function switchTab(tab) {
     document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
@@ -517,6 +549,51 @@
     if (msg) t.innerText = msg;
     t.style.display = 'block';
     setTimeout(() => { t.style.display = 'none'; }, 3000);
+  }
+
+  function copyDiscordCommand() {
+    const sheetUrl = currentSheetUrl || document.getElementById('sheetUrlInput').value.trim() || 'https://docs.google.com/spreadsheets/d/...';
+    const cmd = activeDate && activeDate !== 'All'
+      ? `/bulktask sheets_url: ${sheetUrl} date: ${activeDate}`
+      : `/bulktask sheets_url: ${sheetUrl}`;
+    navigator.clipboard.writeText(cmd).then(() => {
+      showToast("⚡ Copied /bulktask command! Paste directly into Discord.");
+    }).catch(() => {
+      prompt("Copy Discord Command:", cmd);
+    });
+  }
+
+  function switchDateSection(date) {
+    if (!allDateSections[date]) return;
+    activeDate = date;
+    parsedTasks = allDateSections[date];
+    document.getElementById('activeDateBadge').innerText = date;
+    renderTasksTable();
+    updateOutput();
+    showToast(`📅 Switched to ${date} (${parsedTasks.length} tasks)`);
+  }
+
+  function setupDateDropdown(sections, latestDate) {
+    const select = document.getElementById('dateSectionSelect');
+    select.innerHTML = '';
+    const dates = Object.keys(sections);
+
+    if (dates.length <= 1) {
+      document.getElementById('dateBannerCard').style.display = 'none';
+      return;
+    }
+
+    document.getElementById('dateBannerCard').style.display = 'block';
+    // Reverse so latest dates appear first
+    const reversedDates = [...dates].reverse();
+    reversedDates.forEach(d => {
+      const opt = document.createElement('option');
+      opt.value = d;
+      const isLatest = d === latestDate;
+      opt.innerText = `📅 ${d} (${sections[d].length} tasks)${isLatest ? ' [Latest]' : ''}`;
+      if (isLatest) opt.selected = true;
+      select.appendChild(opt);
+    });
   }
 
   // Parse CSV or TSV (tab-separated from copy-paste)
@@ -562,87 +639,79 @@
     const grid = parseDelimited(raw);
     if (!grid.length) return;
 
-    // Detect column indices
-    let linkIdx = -1;
-    let commentIdx = -1;
-    let rewardIdx = -1;
-    let slotsIdx = -1;
-
-    const headers = grid[0].map(h => h.toLowerCase().replace(/[\s_-]/g, ''));
-    headers.forEach((h, idx) => {
-      if (h.includes('post') || h.includes('link') || h.includes('url') || h.includes('reddit')) {
-        if (linkIdx === -1) linkIdx = idx;
-      }
-      if (h.includes('comment') || h.includes('content') || h.includes('copy') || h.includes('text')) {
-        if (commentIdx === -1) commentIdx = idx;
-      }
-      if (h.includes('reward') || h.includes('pay') || h.includes('rate') || h.includes('price')) {
-        if (rewardIdx === -1) rewardIdx = idx;
-      }
-      if (h.includes('slot') || h.includes('count') || h.includes('qty')) {
-        if (slotsIdx === -1) slotsIdx = idx;
-      }
-    });
-
-    // Fallbacks if headers weren't named standardly
-    if (linkIdx === -1) {
-      // Find first column containing "reddit.com" or "http"
-      for (let row of grid) {
-        row.forEach((cell, idx) => {
-          if (cell.includes('http://') || cell.includes('https://')) {
-            linkIdx = idx;
-          }
-        });
-        if (linkIdx !== -1) break;
-      }
-    }
-
-    if (linkIdx === -1) {
-      alert("Could not find any Reddit post link in the pasted data. Please check your columns.");
-      return;
-    }
-
-    if (commentIdx === -1) {
-      // Pick the next column after link or column with longest text
-      commentIdx = (linkIdx === 1 && grid[0].length > 2) ? 2 : (linkIdx === 0 && grid[0].length > 1 ? 1 : -1);
-    }
-
     const defType = document.getElementById('cfgType').value;
     const defReward = parseFloat(document.getElementById('cfgReward').value) || 1.00;
     const defSlots = parseInt(document.getElementById('cfgSlots').value) || 1;
     const defHold = parseInt(document.getElementById('cfgHold').value) || 24;
 
-    parsedTasks = [];
-    const seenLinks = new Set();
-    let dupCount = 0;
+    allDateSections = {};
+    let curDate = "General";
+    let curTasks = [];
 
-    grid.forEach((row, rIdx) => {
-      const link = (row[linkIdx] || '').trim();
-      // Skip headers or banner rows without https://
-      if (!link.startsWith('http://') && !link.startsWith('https://')) return;
+    grid.forEach((row) => {
+      // Check for date banner
+      let rowDate = null;
+      for (const cell of row) {
+        if (!redditUrlRegex.test(cell)) {
+          const m = cell.match(dateBannerRegex);
+          if (m) { rowDate = m[1]; break; }
+        }
+      }
 
-      const comment = commentIdx !== -1 ? (row[commentIdx] || '').trim() : '';
-      const reward = rewardIdx !== -1 && parseFloat(row[rewardIdx]) ? parseFloat(row[rewardIdx]) : defReward;
-      const slots = slotsIdx !== -1 && parseInt(row[slotsIdx]) ? parseInt(row[slotsIdx]) : defSlots;
+      if (rowDate) {
+        if (curTasks.length) allDateSections[curDate] = curTasks;
+        curDate = rowDate;
+        curTasks = [];
+        return;
+      }
 
-      if (seenLinks.has(link.toLowerCase())) dupCount++;
-      seenLinks.add(link.toLowerCase());
+      let link = "";
+      let linkIdx = -1;
+      for (let c = 0; c < row.length; c++) {
+        if (redditUrlRegex.test(row[c])) {
+          link = row[c].trim();
+          linkIdx = c;
+          break;
+        }
+      }
+      if (!link) return;
 
-      parsedTasks.push({
+      let comment = "";
+      if (linkIdx !== -1 && linkIdx + 1 < row.length && !redditUrlRegex.test(row[linkIdx + 1])) {
+        comment = row[linkIdx + 1].trim();
+      } else if (row[2] && !redditUrlRegex.test(row[2])) {
+        comment = row[2].trim();
+      }
+
+      curTasks.push({
         type: defType,
         task_link: link,
         prewritten_comment: comment,
-        reward: reward,
-        slots: slots,
+        reward: defReward,
+        slots: defSlots,
         hold_hours: defHold
       });
     });
 
+    if (curTasks.length) allDateSections[curDate] = curTasks;
+
+    const dates = Object.keys(allDateSections);
+    if (!dates.length) {
+      alert("Could not find any Reddit post links in the pasted data. Please check your columns.");
+      return;
+    }
+
+    const latestDate = dates[dates.length - 1];
+    activeDate = latestDate;
+    parsedTasks = allDateSections[latestDate];
+    document.getElementById('activeDateBadge').innerText = latestDate;
+
+    setupDateDropdown(allDateSections, latestDate);
     renderTasksTable();
     updateOutput();
-    document.getElementById('statDuplicates').innerText = dupCount;
     document.getElementById('previewSection').style.display = 'block';
     document.getElementById('copyBtn').style.display = 'inline-flex';
+    showToast(`✅ Successfully processed ${parsedTasks.length} tasks!`);
   }
 
   function renderTasksTable() {
@@ -661,7 +730,7 @@
         <td style="color:var(--text-muted); font-size:11px;">${i + 1}</td>
         <td><span class="badge badge-primary">${t.type}</span></td>
         <td class="link-cell"><a href="${t.task_link}" target="_blank">${t.task_link}</a></td>
-        <td class="comment-cell" title="${t.prewritten_comment.replace(/"/g, '&quot;')}">${t.prewritten_comment || '<em>(none)</em>'}</td>
+        <td class="comment-cell" title="${(t.prewritten_comment || '').replace(/"/g, '&quot;')}">${t.prewritten_comment || '<em>(none)</em>'}</td>
         <td>$${t.reward.toFixed(2)}</td>
         <td>${t.slots}</td>
         <td>${t.hold_hours}h</td>
@@ -741,7 +810,7 @@
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `reddit-microtasks-${new Date().toISOString().slice(0,10)}.csv`;
+    a.download = `reddit-tasks-${activeDate || new Date().toISOString().slice(0,10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
   }
@@ -750,6 +819,7 @@
     document.getElementById('rawInput').value = '';
     document.getElementById('outputCsv').value = '';
     parsedTasks = [];
+    allDateSections = {};
     document.getElementById('previewSection').style.display = 'none';
     document.getElementById('copyBtn').style.display = 'none';
   }
@@ -767,14 +837,14 @@
       return;
     }
 
+    currentSheetUrl = url;
     const sheetId = match[1];
-    let gid = '0';
+    let gid = '576030809'; // Default to active Sheet2 where daily drops are appended
     const gidMatch = url.match(/gid=(\d+)/);
     if (gidMatch) gid = gidMatch[1];
 
     showToast("⏳ Fetching tasks from Google Sheets...");
 
-    // Use Google Visualization JSONP callback to bypass browser CORS completely!
     const callbackName = 'gvizCallback_' + Date.now();
     const script = document.createElement('script');
     
@@ -792,33 +862,56 @@
       const defSlots = parseInt(document.getElementById('cfgSlots').value) || 1;
       const defHold = parseInt(document.getElementById('cfgHold').value) || 24;
 
-      parsedTasks = [];
-      const seenLinks = new Set();
+      allDateSections = {};
+      let curDate = "General";
+      let curTasks = [];
       let dupCount = 0;
+      const seenLinks = new Set();
 
       data.table.rows.forEach(r => {
         const cells = (r.c || []).map(cell => cell ? (cell.f !== undefined ? cell.f : (cell.v !== undefined ? String(cell.v) : '')) : '');
         
-        // Find Reddit / web link in cells
-        const link = cells.find(c => c.startsWith('http://') || c.startsWith('https://'));
+        // Check for date banner row
+        let rowDate = null;
+        for (const cell of cells) {
+          if (!redditUrlRegex.test(cell)) {
+            const m = cell.match(dateBannerRegex);
+            if (m) { rowDate = m[1]; break; }
+          }
+        }
+
+        if (rowDate) {
+          if (curTasks.length) allDateSections[curDate] = curTasks;
+          curDate = rowDate;
+          curTasks = [];
+          return;
+        }
+
+        // Find Reddit URL
+        let link = "";
+        let linkIdx = -1;
+        for (let c = 0; c < cells.length; c++) {
+          if (redditUrlRegex.test(cells[c])) {
+            link = cells[c].trim();
+            linkIdx = c;
+            break;
+          }
+        }
         if (!link) return;
 
-        // Find comment text (the cell next to link or longest remaining string)
-        const linkIdx = cells.indexOf(link);
         let comment = '';
-        if (linkIdx !== -1 && linkIdx + 1 < cells.length && cells[linkIdx + 1]) {
+        if (linkIdx !== -1 && linkIdx + 1 < cells.length && !redditUrlRegex.test(cells[linkIdx + 1])) {
           comment = cells[linkIdx + 1].trim();
-        } else {
-          const candidates = cells.filter((c, i) => i !== linkIdx && c.length > 5);
-          if (candidates.length) comment = candidates[0].trim();
+        } else if (cells[2] && !redditUrlRegex.test(cells[2])) {
+          comment = cells[2].trim();
         }
 
         if (seenLinks.has(link.toLowerCase())) dupCount++;
         seenLinks.add(link.toLowerCase());
 
-        parsedTasks.push({
+        curTasks.push({
           type: defType,
-          task_link: link.trim(),
+          task_link: link,
           prewritten_comment: comment,
           reward: defReward,
           slots: defSlots,
@@ -826,17 +919,26 @@
         });
       });
 
-      if (!parsedTasks.length) {
+      if (curTasks.length) allDateSections[curDate] = curTasks;
+
+      const dates = Object.keys(allDateSections);
+      if (!dates.length) {
         alert("Could not find valid task links in the sheet. Please make sure rows have Reddit URLs.");
         return;
       }
 
+      const latestDate = dates[dates.length - 1];
+      activeDate = latestDate;
+      parsedTasks = allDateSections[latestDate];
+      document.getElementById('activeDateBadge').innerText = latestDate;
+
+      setupDateDropdown(allDateSections, latestDate);
       renderTasksTable();
       updateOutput();
       document.getElementById('statDuplicates').innerText = dupCount;
       document.getElementById('previewSection').style.display = 'block';
       document.getElementById('copyBtn').style.display = 'inline-flex';
-      showToast(`✅ Successfully imported ${parsedTasks.length} tasks!`);
+      showToast(`✅ Loaded ${dates.length} daily drop section(s)! Selected: ${latestDate} (${parsedTasks.length} tasks)`);
     };
 
     script.src = `https://docs.google.com/spreadsheets/d/${sheetId}/gviz/tq?tqx=responseHandler:${callbackName}&gid=${gid}`;
